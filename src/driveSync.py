@@ -1,4 +1,5 @@
-from tkinter import N
+from re import I
+from tkinter import N, SEL
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -13,19 +14,29 @@ import time
 import magic
 from tqdm import tqdm
 from generic import DateTimeOperations as gen
+from generic import Logger
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 # SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/drive.file']
 
+class Logger:
+    def __init__(self, log_file='app.log'):
+        self.log_file = log_file
+
+    def log(self, message):
+        with open(self.log_file, 'a', encoding='utf-8') as file:
+            msg = f"{datetime.now()}: {message}\n"
+            file.write(msg)
 
 class GCloudDriver:
     
     def __init__(self, local_target, drive_target):
+        self.logger = Logger()
         self.local_target = local_target
         self.drive_target = drive_target
         self.service = self.authenticate()
         self.recent_file_md = None
         self.md_data = None
-        self.md_md = None
+        self.md_md = None  # Initialize Logger
         
         self.md_file_name = "drive_metadata_ssoc.json"
         self.md_exists = self.check_file_exists(self.md_file_name, self.drive_target)
@@ -35,36 +46,42 @@ class GCloudDriver:
             try:
                 self.md_data = json.loads(temp.decode('utf-8'))
             except json.JSONDecodeError:
-                print("md is empty")
-            print(self.md_md)
-            print(json.dumps(self.md_data, indent=4))
+                self.logger.log("md is empty")
+            self.logger.log(f"Metadata: {self.md_md}")
+            self.logger.log(json.dumps(self.md_data, indent=4))
         else:
             with open(self.md_file_name, 'w') as newMd:
                 newMd.close()
             self.upload_file(self.md_file_name, 'text/plain', self.drive_target)
             self.md_exists = self.check_file_exists(self.md_file_name, self.drive_target)
             if self.md_exists:
-                print("Newly Created*******")
+                self.logger.log("Newly Created*******")
                 self.md_md = self.recent_file_md[0]
             else:
-                print(f"not created:{self.md_exists}")
+                self.logger.log(f"not created: {self.md_exists}")
 
     # Authenticate function
     def authenticate(self):
         creds = None
+        self.logger.log("Starting authentication process.")
         if os.path.exists('token.json'):
             creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+            self.logger.log("Loaded credentials from token.json.")
         
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
+                self.logger.log("Refreshed expired credentials.")
             else:
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
                 creds = flow.run_local_server(port=0)
+                self.logger.log("Performed new OAuth flow.")
 
             with open('token.json', 'w') as token:
                 token.write(creds.to_json())
+                self.logger.log("Saved new credentials to token.json.")
         
+        self.logger.log("Authentication process completed.")
         return build('drive', 'v3', credentials=creds)
 
     def sync_drive(self):
@@ -73,77 +90,45 @@ class GCloudDriver:
                 if upfile is not None:
                     if self.getFileMd5(fid=upfile['id']) == upfile['md5']:
                         if self.getFileMd5(fpath=upfile['location']) == upfile['md5']:
-                            print("No Changes...")
+                            self.logger.log("No Changes...")
                             continue
                         else:
-                            print(f"Local File:{f} has been changed since last upload")
-                            """
-                            updated_file = self.service.files().update(
-                                fileId=upfile['id'],
-                                media_body=MediaFileUpload(upfile['location'], mimetype='text/plain', resumable=True),
-                                supportsAllDrives=True
-                            ).execute()
-                            time.sleep(2)
-                            self.md_data[f][idx]['md5'] = self.getFileMd5(fpath=upfile['location'])
-                            self.md_data[f][idx]['modified_time'] = gen.format_date(local_date = os.path.getmtime(upfile['location']))
-                            """
+                            self.logger.log(f"Local File:{f} has been changed since last upload")
+                            updated_file = self.update_file(file_id=upfile['id'], file_path=upfile['location'], mime_type='text/plain')
+                            self.logger.log(f"File {updated_file['name']} has been updated.")
                     else:
                         if self.getFileMd5(fpath=upfile['location']) == upfile['md5']:
-                            print(f" Up Shared File:{f} has been changed since last upload")
+                            self.logger.log(f"Up Shared File:{f} has been changed since last upload")
                         else:
-                            print(f"Both Local and Shared File:{f} has been changed since last upload")
+                            self.logger.log(f"Both Local and Shared File:{f} has been changed since last upload")
                             local_modified_time = upfile['modified_time']
-                            new_local_modified_time = gen.format_date(local_date = os.path.getmtime(upfile['location']))
-###FIX-ME:: UPDATE local_modified_time to real time
+                            new_local_modified_time = gen.format_date(local_date=os.path.getmtime(upfile['location']))
+                   ###FIX-ME:: UPDATE local_modified_time to real time
                             local_modified_time = upfile['uptime']
                             up_modified_time = upfile['uptime']
                             file_info = self.service.files().get(fileId=upfile['id'],
                                     supportsAllDrives=True,  
                                     fields='modifiedTime').execute()
-                            new_up_modified_time = gen.format_date(mod_date = file_info['modifiedTime'])
+                            new_up_modified_time = gen.format_date(mod_date=file_info['modifiedTime'])
 
-                            # substract local_old - local_new and up_old - up_new and which ever is greater that is the file to be uploaded
-                            # local_diff = datetime.strptime(new_local_modified_time, '%Y-%m-%d %H:%M:%S.%f') - datetime.strptime(local_modified_time, '%Y-%m-%d %H:%M:%S.%f')
-                            # up_diff = datetime.strptime(new_up_modified_time, '%Y-%m-%d %H:%M:%S.%f') - datetime.strptime(up_modified_time, '%Y-%m-%d %H:%M:%S.%f')
-
-
-                            # Update the datetime parsing to handle timezone information
                             local_diff = datetime.strptime(new_local_modified_time.split('+')[0], '%Y-%m-%d %H:%M:%S.%f') - datetime.strptime(local_modified_time.split('+')[0], '%Y-%m-%d %H:%M:%S.%f')
                             up_diff = datetime.strptime(new_up_modified_time.split('+')[0], '%Y-%m-%d %H:%M:%S.%f') - datetime.strptime(up_modified_time.split('+')[0], '%Y-%m-%d %H:%M:%S.%f')
 
-                            print(f"{str(local_diff)=}")
-                            print(f"{str(up_diff)=}")
-                            print(f"{str(local_modified_time)=}")
-                            print(f"{str(new_local_modified_time)=}")
-                            print(f"{str(up_modified_time)=}")
-                            print(f"{str(new_up_modified_time)=}")
+                            self.logger.log(f"{str(local_diff)=}")
+                            self.logger.log(f"{str(up_diff)=}")
+                            self.logger.log(f"{str(local_modified_time)=}")
+                            self.logger.log(f"{str(new_local_modified_time)=}")
+                            self.logger.log(f"{str(up_modified_time)=}")
+                            self.logger.log(f"{str(new_up_modified_time)=}")
                             if local_diff > up_diff:
-                                print("Up and local files both not up to date, local file is more latest")
-                                """
-                                print(f"Uploading local file: {f}")
-                                updated_file = self.service.files().update(
-                                    fileId=upfile['id'],
-                                    media_body=MediaFileUpload(upfile['location'], mimetype='text/plain', resumable=True),
-                                    supportsAllDrives=True
-                                ).execute()
-                                time.sleep(2)
-                                self.md_data[f][idx]['md5'] = self.getFileMd5(fpath=upfile['location'])
-                                self.md_data[f][idx]['modified_time'] = gen.format_date(local_date=os.path.getmtime(upfile['location']))
-                                """
+                                self.logger.log("Up and local files both not up to date, local file is more latest")
                             else:
-                                print("Up and local files both not up to date, up file is more latest")
-                                """
-                                print(f"Downloading shared file: {f}")
-                                file_content = self.getFile(fid=upfile['id'])
-                                with open(upfile['location'], 'wb') as local_file:
-                                    local_file.write(file_content)
-                                self.md_data[f][idx]['md5'] = self.getFileMd5(fpath=upfile['location'])
-                                self.md_data[f][idx]['modified_time'] = gen.format_date(local_date=os.path.getmtime(upfile['location']))
-                                """
+                                self.logger.log("Up and local files both not up to date, up file is more latest")
 
 
     # Upload file function
     def upload_file(self, file_path, mime_type, folder_id=None):
+        self.logger.log(f"Uploading file: {file_path}")
         drive_service = self.service
         abs_path = os.path.abspath(file_path)
         fmd5 = self.getFileMd5(fpath=file_path)
@@ -151,61 +136,47 @@ class GCloudDriver:
         filename = os.path.basename(file_path)
         isNewFileWithSimName = True
         extend = False
-        # ----- Getting local file md dict:
-        # creation_time = os.path.getctime(file_path)
-        # creation_date = datetime.fromtimestamp(creation_time)
-        # formatted_creation_date = creation_date.strftime('%Y-%m-%d %H:%M:%S.') + f"{creation_date.microsecond // 1000:03}"
-        print("----getting local creation date")
-        formatted_creation_date = gen.format_date(local_date = os.path.getctime(file_path))
-        print("----getting local modified date")
+        self.logger.log("----getting local creation date")
+        formatted_creation_date = gen.format_date(local_date=os.path.getctime(file_path))
+        self.logger.log("----getting local modified date")
         if self.md_data is not None and filename in self.md_data.keys():
-            formatted_modified_date = gen.format_date(local_date = os.path.getmtime(file_path))
+            formatted_modified_date = gen.format_date(local_date=os.path.getmtime(file_path))
         else:
-            formatted_modified_date = gen.format_date(local_date = time.time())
-            
-        # modified_time = os.path.getmtime(file_path)
-        # modified_date = datetime.fromtimestamp(modified_time)
-        # formatted_modified_date = modified_date.strftime('%Y-%m-%d %H:%M:%S.') + f"{modified_date.microsecond // 1000:03}"
-        
-        # print(f'{creation_time=} ; {formatted_creation_date=}')
-        # print(f'{modified_time=} ; {formatted_modified_date=}')
+            formatted_modified_date = gen.format_date(local_date=time.time())
+
         temp = [{"creation_time": formatted_creation_date,
-                    "modified_time": formatted_modified_date,
-                    "md5": fmd5,
-                    "location": abs_path,
-                    "uptime": None,
-                    "id": None}]
-        print(f'{temp=}')
+                 "modified_time": formatted_modified_date,
+                 "md5": fmd5,
+                 "location": abs_path,
+                 "uptime": None,
+                 "id": None}]
+        self.logger.log(f'{temp=}')
         # ------
-        
+
         media = MediaFileUpload(file_path, mimetype='text/plain', resumable=True)
-        print("******************************************")
-        # print(f"{self.md_data.keys()=}")
-        # print(f"{file_path=}")
-        
-        # print(f"{self.md_data=}")
+        self.logger.log("******************************************")
         if self.md_data is not None and filename in self.md_data.keys():
             # If curr filename present in drive
-            
+
             for idx, upfile in enumerate(self.md_data[filename]):
-                print("upfile:",upfile)
-                print("abs_path:",abs_path)
+                self.logger.log(f"upfile: {upfile}")
+                self.logger.log(f"abs_path: {abs_path}")
                 if upfile["location"] == abs_path:
                     isNewFileWithSimName = False
                     # Uploaded file loc is same as file loc to be uploaded
                     if fmd5.lower() == upfile["md5"].lower():
-                        print("******************************************")
-                        print("*************Already UptoDate*************")
-                        print("******************************************")
+                        self.logger.log("******************************************")
+                        self.logger.log("*************Already UptoDate*************")
+                        self.logger.log("******************************************")
                         return True
                     else:
-                        print("Content changed since last Upload")
+                        self.logger.log("Content changed since last Upload")
                         updated_file = self.service.files().update(
                             fileId=upfile['id'],
                             media_body=media,
                             supportsAllDrives=True
                         ).execute()
-###FIX-ME:: ADD check if successfully updated by comparing md5
+                        ###FIX-ME:: ADD check if successfully updated by comparing md5
                         time.sleep(2)
                         self.md_data[filename][idx]["md5"] = fmd5
                         self.md_data[filename][idx]["modified_time"] = formatted_modified_date
@@ -215,11 +186,10 @@ class GCloudDriver:
                     extend = True
                 else:
                     #ROOT MD missing ERROR
-                    print("#######-----ERR:Root Md missing !False-----#######")
+                    self.logger.log("#######-----ERR:Root Md missing !False-----#######")
                     # return False
         if isNewFileWithSimName:
             # filename is new to drive
-            # if filename == self.md_file_name:
             file_metadata = {'name': filename}
             # Set the parent folder if provided
             if folder_id:
@@ -227,67 +197,117 @@ class GCloudDriver:
             file = drive_service.files().create(
                 body=file_metadata,
                 media_body=media,
-                fields='id', 
+                fields='id',
                 supportsAllDrives=True
             ).execute()
-# Fix-Me::: check if file uploaded
-###FIX-ME:: ADD check if successfully updated by comparing md5
+            # Fix-Me::: check if file uploaded
+            ###FIX-ME:: ADD check if successfully updated by comparing md5
             time.sleep(2)
             if self.md_exists:
                 #if not first time user:
-                
+
                 temp[0]['id'] = file['id']
-                print(f'File uploaded successfully with File ID: {file["id"]}')
-                file_info = drive_service.files().get(fileId=temp[0]['id'],
-                        supportsAllDrives=True,  
-                        fields='modifiedTime').execute()
-                temp[0]['uptime'] = gen.format_date(mod_date = file_info['modifiedTime'])
-                print(file)
+                self.logger.log(f'File uploaded successfully with File ID: {file["id"]}')
+                file_info = self.get_file(file_id=temp[0]['id'])
+                self.logger.log(f"{file_info=}")
+
+                temp[0]['uptime'] = gen.format_date(mod_date=file_info['modifiedTime'])
+                self.logger.log(file)
                 # ----- Updating self.md with local file md dict
                 if self.md_data is None:
-                    self.md_data = {filename:temp}
+                    self.md_data = {filename: temp}
                 elif extend:
                     self.md_data[filename].extend(temp)
                 else:
                     self.md_data[filename] = temp
                 # ------
-                
+
                 # ----- Uploading self.md to drive
-                print(f"{self.md_data=}")
-                with open(self.md_file_name, 'w') as newMd:
-                    json.dump(self.md_data, newMd)
-                    newMd.close()
-                media = MediaFileUpload(self.md_file_name, mimetype='text/plain', resumable=True)
-                print("")
-                updated_file = self.service.files().update(
-                    fileId=self.md_md['id'],
-                    media_body=media,
-                    supportsAllDrives=True
-                ).execute()
-                print(f"File {updated_file['name']} has been updated.")
+                self.logger.log(f"{self.md_data=}")
+                self.logger.log("")
+                updated_file = self.update_file(file_id=self.md_md['id'], file_path=self.md_file_name, mime_type='text/plain')
+                self.logger.log(f"File {updated_file['name']} has been updated.")
                 # ------
-                
+
             else:
                 #ROOT MD missing ERROR
-                print("#######-----ERR:Root Md missing-----#######")
+                self.logger.log("#######-----ERR:Root Md missing-----#######")
                 return False
-            
-            
+
         # ----- Uploading self.md to drive
-        with open(self.md_file_name, 'w') as newMd:
-            json.dump(self.md_data, newMd)
-            newMd.close()
-        media = MediaFileUpload(self.md_file_name, mimetype='text/plain', resumable=True)
-        print("")
-        updated_file = self.service.files().update(
-            fileId=self.md_md['id'],
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
-        print(f"File {updated_file['name']} has been updated.")
+        updated_file = self.update_file(file_id=self.md_md['id'], file_path=self.md_file_name, mime_type='text/plain')
+        self.logger.log(f"File {updated_file['name']} has been updated.")
         # ------
-            
+
         return False
+
+    def create_file(self, file_name, file_path, mime_type, folder_id=None):
+        self.logger.log(f"Creating file: {file_name}")
+        if file_path is not None:
+            if folder_id is None:
+                self.logger.log("No folder ID provided. Please provide a folder ID to create a file.")
+                return
+            if file_name is None:
+                file_name = os.path.basename(file_path)
+            file_path = file_path
+            media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+            file_metadata = {
+                'name': file_name,
+                'parents': [folder_id]
+            }
+            new_file = self.service.files().create(
+                body=file_metadata,
+                media_body=media,
+                supportsAllDrives=True
+            ).execute()
+    ###FIX-ME:: ADD check if file Created and remove sleep
+            time.sleep(2)
+            self.logger.log(f"File created: {new_file['name']} (ID: {new_file['id']})")
+            return new_file
+        else:
+            self.logger.log("No file path provided. Please provide a file path to create a file.")
+
+    def get_file(self, file_id=None, file_name=None, folder_id=None):
+        self.logger.log(f"Retrieving file: {file_name}")
+        if file_id is not None:
+            file_id = file_id
+            try:
+                request = self.service.files().get(fileId=file_id, supportsAllDrives=True, fields='modifiedTime, name')
+                file_content = request.execute()
+                self.logger.log(f"File with ID {file_id} retrieved successfully.")
+                return file_content
+            except HttpError as error:
+                self.logger.log(f"An error occurred while retrieving file with ID {file_id}: {error}")
+                return None
+        else:
+            self.logger.log("No file ID provided. Please provide a file ID to get a file.")
+            return None
+
+    def update_file(self, file_id=None, file_path=None, mime_type=None, folder_id=None):
+        self.logger.log(f"Updating file: {file_path}")
+        if file_id is not None:
+            # Check if the file being updated is the metadata file then first create the metadata local file
+            if os.path.basename(file_path) == self.md_file_name:
+                self.update_file(file_path=file_path)
+            file_id = file_id
+            media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+            updated_file = self.service.files().update(
+                fileId=file_id,
+                media_body=media,
+                supportsAllDrives=True
+            ).execute()
+            self.logger.log(f"File updated: {updated_file['name']} (ID: {updated_file['id']})")
+            return updated_file
+        elif file_path is not None:
+            with open(file_path, 'w') as newMd:
+                if os.path.basename(file_path) == self.md_file_name:
+                    json.dump(self.md_data, newMd)
+                else:
+                    # if not md file then create a new file
+                    print(f"Not md file", file_path)
+                newMd.close()
+        else:
+            self.logger.log("No file ID or file path provided. Please provide either to update a file.")
 
     def check_access(self, folder_id):
         service = self.service
@@ -303,16 +323,16 @@ class GCloudDriver:
             ).execute()
 
             files = results.get('files')
-            print(files)
+            self.logger.log(f"Files in folder {folder_id}: {files}")
             if not files:
-                print(f"No files found in folder {folder_id}. This could mean the folder is empty or doesn't exist.")
+                self.logger.log(f"No files found in folder {folder_id}. This could mean the folder is empty or doesn't exist.")
             else:
-                print(f"Files found in folder {folder_id}:")
+                self.logger.log(f"Files found in folder {folder_id}:")
                 for file in files:
-                    print(f"File: {file['name']} (ID: {file['id']})")
+                    self.logger.log(f"File: {file['name']} (ID: {file['id']})")
 
         except Exception as e:
-            print(f"An error occurred: {e}")
+            self.logger.log(f"An error occurred: {e}")
 
     def getFileMetadata(self, fpath=None, fid=None):
         if fpath is not None:
@@ -340,7 +360,7 @@ class GCloudDriver:
     
     def check_file_exists(self, filename, folder_id):
         query = f"name = '{filename}' and '{folder_id}' in parents"# and trashed = false"
-        print(query)
+        self.logger.log(query)
         drive_service = self.service
         
         # List files with the search query
@@ -350,11 +370,11 @@ class GCloudDriver:
         items = results.get('files', [])
         
         if not items:
-            print(f"No file found with name {filename}")
+            self.logger.log(f"No file found with name {filename}")
             return False
         else:
-            print(f"File '{filename}' found.")
-            print(items)
+            self.logger.log(f"File '{filename}' found.")
+            self.logger.log(str(items))
             self.recent_file_md = items
             return True
         
@@ -364,7 +384,7 @@ class GCloudDriver:
         items = results.get('files', [])
 
         for item in items:
-            print(f"File: {item['name']} ID: {item['id']}")
+            self.logger.log(f"File: {item['name']} ID: {item['id']}")
             
         
         # Test listing all files without filtering by folder
@@ -377,33 +397,37 @@ class GCloudDriver:
         items = results.get('files', [])
 
         for item in items:
-            # print(f"ALL File: {item['name']} ID: {item['id']} parent: {item['parents']}")
-            print(item)
+            # self.logger.log(f"ALL File: {item['name']} ID: {item['id']} parent: {item['parents']}")
+            self.logger.log(str(item))
 
     def getMime(self, filepath):
         if os.path.exists(filepath):
             mime_type = magic.Magic(mime=True)
             file_mime_type = mime_type.from_file(filepath)
+            self.logger.log(f"File MIME type for {filepath}: {file_mime_type}")
             return file_mime_type
         else:
-            print("Not a valid path")
+            self.logger.log(f"Invalid path: {filepath}")
             return ""
 
     def getFileMd5(self, fpath=None, fid=None):
         if fpath is not None:
-            print(f"Reading Md5:{fpath}")
+            self.logger.log(f"Reading Md5 for local file: {fpath}")
             md5_hash = hashlib.md5()
             with open(fpath, 'rb') as file:
                 for chunk in iter(lambda: file.read(4096), b""):
                     md5_hash.update(chunk)
             file_md5 = md5_hash.hexdigest()
+            self.logger.log(f"MD5 for local file {fpath}: {file_md5}")
             return file_md5
         if fid is not None:
+            self.logger.log(f"Reading Md5 for file ID: {fid}")
             file_id = fid
             drive_service = self.service
             request = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True)
             drive_file_content = request.execute()
             drive_file_hash = hashlib.md5(drive_file_content).hexdigest()
+            self.logger.log(f"MD5 for file ID {fid}: {drive_file_hash}")
             return drive_file_hash
             
     def getFile(self, fpath=None, fid=None):
@@ -412,16 +436,19 @@ class GCloudDriver:
         if fid is not None:
             file_id = fid
             drive_service = self.service
-            request = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True)
-            existing_file_content = request.execute()
-            existing_file_hash = hashlib.md5(existing_file_content).hexdigest()
-            print(f"{existing_file_hash=} {existing_file_content=}")
-            
-            
-            file_metadata = drive_service.files().get(fileId=file_id, supportsAllDrives=True, fields='md5Checksum').execute()
-            content_md5 = file_metadata.get('md5Checksum')
-            # print(f"{content_md5=} {existing_file_content=}")
-            return existing_file_content
+            try:
+                request = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True)
+                existing_file_content = request.execute()
+                existing_file_hash = hashlib.md5(existing_file_content).hexdigest()
+                self.logger.log(f"File content and hash retrieved: {existing_file_hash=}, {existing_file_content=}")
+                
+                file_metadata = drive_service.files().get(fileId=file_id, supportsAllDrives=True, fields='md5Checksum').execute()
+                content_md5 = file_metadata.get('md5Checksum')
+                self.logger.log(f"File metadata retrieved: {content_md5=}")
+                return existing_file_content
+            except HttpError as error:
+                self.logger.log(f"An error occurred while retrieving file with ID {file_id}: {error}")
+                return None
 
     def create_folder(self, folder_name, parent_folder_id):
         """Create a folder on Google Drive."""
@@ -434,23 +461,28 @@ class GCloudDriver:
         try:
             # Create the folder
             folder = self.service.files().create(body=file_metadata, fields='id', supportsAllDrives=True).execute()
-            print(f'Folder "{folder_name}" created with ID: {folder["id"]}')
+            self.logger.log(f'Folder "{folder_name}" created with ID: {folder["id"]}')
             return folder
         except HttpError as error:
-            print(f'An error occurred while creating folder: {folder_name} inside Parent:{parent_folder_id}:\n {error}')
+            self.logger.log(f'An error occurred while creating folder: {folder_name} inside Parent:{parent_folder_id}:\n {error}')
         return False
     
     def get_folder_size(self, folder_path):
         total_size = 0
         # Walk through all files and subfolders in the directory
         if os.path.isfile(folder_path):
-            return os.path.getsize(folder_path)
+            size = os.path.getsize(folder_path)
+            self.logger.log(f"Size of file {folder_path}: {size} bytes")
+            return size
         for dirpath, dirnames, filenames in os.walk(folder_path):
             for filename in filenames:
                 file_path = os.path.join(dirpath, filename)
                 # Add the size of each file to the total size
                 if os.path.getsize(file_path) < 100000000:
-                    total_size += os.path.getsize(file_path)
+                    file_size = os.path.getsize(file_path)
+                    total_size += file_size
+                    self.logger.log(f"Adding size of file {file_path}: {file_size} bytes")
+        self.logger.log(f"Total size of folder {folder_path}: {total_size} bytes")
         return total_size
 
     def generate_tree(self, path, indent=""):
@@ -470,16 +502,20 @@ class GCloudDriver:
                     else:
                         tree_structure += f"{indent}├── {item}\n"  # Append file to tree string
             except PermissionError:
-                print(f"perm error:{path}")
+                self.logger.log(f"Permission error: {path}")
         else:
             tree_structure = "The specified path does not exist."
+            self.logger.log(tree_structure)
         
         return tree_structure
     
     def clean_fname(self, fname):
         tab = "│ "
         sib = "├── "
-        return fname.replace(tab,"").replace(sib,"").strip(" ").strip("/")
+        cleaned_name = fname.replace(tab,"").replace(sib,"").strip(" ").strip("/")
+###FIX-ME:: special chars not supported by logger
+        # self.logger.log(f"Cleaned filename: {cleaned_name}")
+        return cleaned_name
 
     def read_tree(self, tree, rootDirName):
         # ININ,STAY,BACK
@@ -488,52 +524,52 @@ class GCloudDriver:
         preLine = ""
         
         root = Path(os.path.abspath(rootDirName))
-        print("PATH::::::",root)
+        self.logger.log(f"PATH::::::{root}")
         hist = {}
 
         folder_id = rootdir
         # root_folder = driver.create_folder(os.path.basename(root), rootdir)
         
         # if not root_folder:
-            # print(f"Creating folder Failed: {root_folder}")
+            # self.logger.log(f"Creating folder Failed: {root_folder}")
             # return False
         
         preLine = os.path.basename(root)
         parent = [[str(rootDirName), root_drive_dir]]
         with tqdm(total=self.get_folder_size(path), unit="B", desc="Uploading files") as pbar:
             for x, line in enumerate(tree.splitlines()):
-                print(f"{line=}")
-                print(f"{parent=}")
+                self.logger.log(f"{line=}")
+                self.logger.log(f"{parent=}")
                 cCount = line.split(sib)[0].count(tab)
                 pCount = preLine.split(sib)[0].count(tab)
                 # items = [i[0] for i in parent]
                 if pCount < cCount:
                     prev_folder = driver.create_folder(self.clean_fname(preLine), parent[-1][1])
                     parent.append([preLine, prev_folder['id']])
-                    print(f'{parent=}')
-                    print("parent:","/".join([self.clean_fname(i[0]) for i in parent]))
-                    print("ININ","parent:","/".join([self.clean_fname(i[0]) for i in parent]),self.clean_fname(line))
+                    self.logger.log(f'{parent=}')
+                    self.logger.log("parent:" + "/".join([self.clean_fname(i[0]) for i in parent]))
+                    self.logger.log("ININ parent:" + "/".join([self.clean_fname(i[0]) for i in parent]) + self.clean_fname(line))
                     
                 if pCount > cCount:
                     for i in range(pCount-cCount):
                         parent.pop()
-                        print("parent:","/".join([self.clean_fname(i[0]) for i in parent]))
-                        print("BACK","parent:","/".join([self.clean_fname(i[0]) for i in parent]),self.clean_fname(line))
+                        self.logger.log("parent:" + "/".join([self.clean_fname(i[0]) for i in parent]))
+                        self.logger.log("BACK parent:" + "/".join([self.clean_fname(i[0]) for i in parent]) + self.clean_fname(line))
                 else:
-                    print(parent)
-                    print("parent:","/".join([self.clean_fname(i[0]) for i in  parent]))
-                    print("STAY",line)
-                print()
+                    self.logger.log(str(parent))
+                    self.logger.log("parent:" + "/".join([self.clean_fname(i[0]) for i in  parent]))
+                    self.logger.log("STAY " + line)
+                self.logger.log("")
                 cleaned = [self.clean_fname(i[0]) for i in  parent]
                 cleaned.append(self.clean_fname(line))
                 item = os.path.join("/".join(cleaned))
                 if os.path.isfile(item) and os.path.getsize(item) < 100000000:
-                    print("------------------------is FIle:",item)
-                    print(f"{parent=}")                    
+                    self.logger.log("------------------------is FIle:" + item)
+                    self.logger.log(f"{parent=}")                    
                     self.upload_file(item, self.getMime(item), parent[-1][1])
-                    print(f"updated:{self.get_folder_size(item)=}")
+                    self.logger.log(f"updated:{self.get_folder_size(item)=}")
                     pbar.update(self.get_folder_size(item))
-                print()
+                self.logger.log("")
                 preLine = line
 
 # Example usage
