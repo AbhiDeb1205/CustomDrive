@@ -452,6 +452,17 @@ class GCloudDriver:
 
     def create_folder(self, folder_name, parent_folder_id):
         """Create a folder on Google Drive."""
+        self.logger.log(f"Creating folder: {folder_name}")
+        
+        # Check if folder already exists
+        query = f"name = '{folder_name}' and '{parent_folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder'"
+        results = self.service.files().list(q=query, supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        items = results.get('files', [])
+        
+        if items:
+            self.logger.log(f"Folder '{folder_name}' already exists in parent folder ID: {parent_folder_id}")
+            return items[0]  # Return the existing folder
+        
         file_metadata = {
             'name': folder_name,
             'mimeType': 'application/vnd.google-apps.folder',
@@ -574,6 +585,17 @@ class GCloudDriver:
 
 # Example usage
 import sys
+import argparse
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Google Drive Sync Script')
+parser.add_argument('--root_dir_id', required=True, help='The root directory ID on Google Drive')
+parser.add_argument('--local_dir_path', required=True, help='The local directory path to backup')
+args = parser.parse_args()
+
+root_drive_dir = args.root_dir_id
+
+driver = GCloudDriver(".", root_drive_dir)
 folder_id = '17jq3u-Suvq3UE5AfMSfnrOn4hg4GgWlr'  # The folder ID extracted from the URL
 folder_id = '1mNXqQmfWoG-KmfzHNHlRVAVafWAoDwt0'  # The folder ID extracted from the URL
 
@@ -582,6 +604,9 @@ folder_id = '18CGD5omuOJwrn2l5QINl_5cBPyvVmAy-'  # The folder ID extracted from 
 
 root_drive_dir = sys.argv[1]
 root_drive_dir = "15U-HuE7EHb7WawCCfXLORbw8GO72lGcA"
+
+root_drive_dir = args.root_dir_id
+
 driver = GCloudDriver(".", root_drive_dir)
 
 # local_time = driver.getFileMetadata(fpath='./token2.json')
@@ -603,12 +628,14 @@ file_id = '12GLKfZ6EJ89k_zsu-s8QnKJs9D-S5lAt' #credjson
 
 
 from pathlib import Path
-import os
-import sys
 
-path=r'D:\UniqueTcCounter'
-# tree = driver.generate_tree(path)
-# driver.read_tree(tree, path)
+path = r'D:\UniqueTcCounter'
+path = os.path.abspath(args.local_dir_path)
+if not os.path.exists(path):
+    print(f"Path doesnot exist: {path}")
+    exit
+tree = driver.generate_tree(path)
+driver.read_tree(tree, path)
 driver.sync_drive()
 
 # for file in root.rglob("*"):  # rglob("*") returns all files and subdirectories recursively
